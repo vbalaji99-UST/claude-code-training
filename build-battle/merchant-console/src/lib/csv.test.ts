@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest"
 import { Payment } from "@/data/types"
-import { EXPORT_COLUMNS, exportFilename, toCsv } from "./csv"
+import {
+  DEFAULT_EXPORT_COLUMNS,
+  EXPORT_COLUMNS,
+  exportFilename,
+  exportLabel,
+  parseExportColumns,
+  parseExportScope,
+  toCsv,
+} from "./csv"
 
 /**
  * The export is the file ops hands to a merchant, so a broken cell is a
@@ -71,6 +79,26 @@ describe("toCsv", () => {
     )
   })
 
+  it("neutralises cells a spreadsheet would run as a formula", () => {
+    for (const lead of ["=", "+", "-", "@", "\t"]) {
+      const risky = { ...payment, description: `${lead}HYPERLINK("x")` }
+      const body = toCsv([risky], ["description"]).split("\n")[1]
+      expect(body.replace(/^"/, "").startsWith("'")).toBe(true)
+    }
+  })
+
+  it("quotes a bare carriage return so the row does not split", () => {
+    const cr = { ...payment, description: "line one\rline two" }
+    expect(toCsv([cr], ["description"])).toBe(
+      ["description", '"line one\rline two"'].join("\n"),
+    )
+  })
+
+  it("leaves a negative amount as a number, not a quoted formula", () => {
+    const negative = { ...payment, amount: -25000 }
+    expect(toCsv([negative], ["amount"])).toBe(["amount", "-$250.00"].join("\n"))
+  })
+
   it("emits a header even with no rows", () => {
     expect(toCsv([], ["id"])).toBe("id")
   })
@@ -81,5 +109,60 @@ describe("exportFilename", () => {
     expect(exportFilename(new Date("2026-03-14T23:00:00.000Z"))).toBe(
       "payments-2026-03-14.csv",
     )
+  })
+
+  it("carries the scope label before the date", () => {
+    const date = new Date("2026-08-13T12:00:00.000Z")
+    expect(exportFilename(date, exportLabel("filtered", "disputed"))).toBe(
+      "payments-disputed-2026-08-13.csv",
+    )
+    expect(exportFilename(date, exportLabel("filtered", "all"))).toBe(
+      "payments-filtered-2026-08-13.csv",
+    )
+    expect(exportFilename(date, exportLabel("all", "disputed"))).toBe(
+      "payments-all-2026-08-13.csv",
+    )
+  })
+})
+
+describe("parseExportColumns", () => {
+  it("keeps a subset of columns in the order requested", () => {
+    const parsed = parseExportColumns("amount,id,currency")
+    expect(parsed).toEqual({ ok: true, columns: ["amount", "id", "currency"] })
+    if (parsed.ok) {
+      expect(toCsv([payment], parsed.columns)).toBe(
+        ["amount,id,currency", "$250.00,pay_0001,USD"].join("\n"),
+      )
+    }
+  })
+
+  it("excludes card last four by default", () => {
+    const parsed = parseExportColumns(null)
+    expect(parsed).toEqual({ ok: true, columns: [...DEFAULT_EXPORT_COLUMNS] })
+    expect(DEFAULT_EXPORT_COLUMNS).not.toContain("last4")
+    expect(DEFAULT_EXPORT_COLUMNS).toHaveLength(EXPORT_COLUMNS.length - 1)
+    if (parsed.ok) expect(toCsv([payment], parsed.columns)).not.toContain("4242")
+  })
+
+  it("rejects an empty selection rather than producing an empty file", () => {
+    expect(parseExportColumns("").ok).toBe(false)
+    expect(parseExportColumns(" , ,").ok).toBe(false)
+  })
+
+  it("rejects column names outside the allowlist", () => {
+    expect(parseExportColumns("id,merchantId").ok).toBe(false)
+    expect(parseExportColumns("id;drop table").ok).toBe(false)
+  })
+
+  it("rejects a column requested twice", () => {
+    expect(parseExportColumns("id,id").ok).toBe(false)
+  })
+})
+
+describe("parseExportScope", () => {
+  it("defaults to the current filter and rejects anything unknown", () => {
+    expect(parseExportScope(null)).toBe("filtered")
+    expect(parseExportScope("all")).toBe("all")
+    expect(parseExportScope("everything")).toBeNull()
   })
 })
